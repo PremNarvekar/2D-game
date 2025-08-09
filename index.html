@@ -1,0 +1,278 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>2D Dodger — Responsive</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    /* extras */
+    .game-area { background: linear-gradient(180deg,#0f172a,#021226); }
+    .player { transition: left 0.06s linear; }
+    .obstacle { will-change: transform, top; }
+    @media (min-width: 640px) { .mobile-controls { display: none; } }
+  </style>
+</head>
+<body class="min-h-screen flex items-center justify-center bg-slate-900 text-white p-4 transition-colors duration-500">
+  <div class="w-full max-w-2xl">
+    <!-- HUD -->
+    <div class="flex items-center justify-between mb-3">
+      <div class="space-x-3 flex items-center">
+        <span id="score" class="font-mono text-lg">Score: 0</span>
+        <span id="best" class="font-mono text-lg text-sky-300">Best: 0</span>
+      </div>
+
+      <div class="flex gap-2">
+        <button id="btn-pause" class="px-3 py-1 bg-yellow-400 text-black rounded-md">Pause</button>
+        <button id="btn-restart" class="px-3 py-1 bg-emerald-500 text-black rounded-md">Restart</button>
+        <button id="toggleTheme" class="px-3 py-1 bg-sky-500 text-white rounded-md">Toggle Theme</button>
+      </div>
+    </div>
+
+    <!-- Game Area (smaller like before, responsive) -->
+    <div id="game" class="relative game-area overflow-hidden rounded-2xl w-full aspect-[9/16] sm:aspect-[16/9]">
+      <!-- player -->
+      <div id="player" class="player absolute bottom-6 bg-sky-400 rounded-md shadow-2xl" style="width:56px;height:56px;"></div>
+
+      <!-- overlay -->
+      <div id="overlay" class="absolute inset-0 flex flex-col items-center justify-center bg-black/60 backdrop-blur-sm">
+        <h1 class="text-3xl font-bold">2D Dodger</h1>
+        <p class="mt-2 text-slate-200 max-w-md text-center">Dodge the falling blocks. Use ← → keys or drag/tap on mobile. Score increases when you dodge blocks.</p>
+        <div class="mt-6 flex gap-3">
+          <button id="btn-start" class="px-4 py-2 bg-sky-500 rounded-md font-semibold">Start</button>
+          <button id="btn-resume" class="px-4 py-2 bg-yellow-400 rounded-md font-semibold">Resume</button>
+        </div>
+      </div>
+
+      <!-- mobile controls -->
+      <div class="mobile-controls absolute left-0 right-0 bottom-3 flex justify-center gap-6 pointer-events-none">
+        <button id="left" class="pointer-events-auto w-14 h-14 rounded-full bg-white/10 flex items-center justify-center font-bold">◀</button>
+        <button id="right" class="pointer-events-auto w-14 h-14 rounded-full bg-white/10 flex items-center justify-center font-bold">▶</button>
+      </div>
+    </div>
+
+    <p class="mt-3 text-sm text-slate-400">Responsive, DOM-based game. Works on desktop & mobile.</p>
+  </div>
+
+  <script>
+    // --- elements ---
+    const game = document.getElementById('game');
+    const player = document.getElementById('player');
+    const overlay = document.getElementById('overlay');
+    const btnStart = document.getElementById('btn-start');
+    const btnResume = document.getElementById('btn-resume');
+    const btnPause = document.getElementById('btn-pause');
+    const btnRestart = document.getElementById('btn-restart');
+    const scoreEl = document.getElementById('score');
+    const bestEl = document.getElementById('best');
+    const toggleTheme = document.getElementById('toggleTheme');
+    const leftBtn = document.getElementById('left');
+    const rightBtn = document.getElementById('right');
+
+    // --- game state ---
+    let gameWidth = 0, gameHeight = 0;
+    let playerX = 0; // px from left
+    let playerW = 56, playerH = 56; // px (kept synced with style)
+
+    let obstacles = [];
+    let running = false, paused = false;
+    let lastTime = 0;
+
+    let spawnTimer = 0, spawnInterval = 1000;
+    let obstacleSpeed = 220; // px/sec (will increase)
+
+    let score = 0;
+    const bestKey = 'dodger_best_v2';
+    let best = Number(localStorage.getItem(bestKey) || 0);
+    bestEl.textContent = 'Best: ' + best;
+
+    // --- utilities ---
+    function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+    function resize() {
+      const rect = game.getBoundingClientRect();
+      gameWidth = rect.width; gameHeight = rect.height;
+      // ensure player dimensions match style (in case of zoom)
+      playerW = player.offsetWidth; playerH = player.offsetHeight;
+      const maxX = gameWidth - playerW;
+      playerX = clamp(playerX, 0, Math.max(0, maxX));
+      player.style.left = playerX + 'px';
+    }
+
+    // spawn obstacle DOM element
+    function spawnObstacle() {
+      const sizePct = Math.random() * (18 - 8) + 8; // percent of width
+      const w = Math.max(18, Math.round(gameWidth * sizePct / 100));
+      const h = Math.round(w * 0.6);
+      const left = Math.round(Math.random() * Math.max(0, gameWidth - w));
+      const el = document.createElement('div');
+      el.className = 'obstacle absolute bg-rose-500 rounded-sm shadow-lg';
+      el.style.width = w + 'px';
+      el.style.height = h + 'px';
+      el.style.left = left + 'px';
+      el.style.top = -h + 'px';
+      game.appendChild(el);
+      obstacles.push({el, left, top: -h, w, h});
+    }
+
+    // collision
+    function rectsOverlap(a,b) {
+      return !(a.right < b.left || a.left > b.right || a.bottom < b.top || a.top > b.bottom);
+    }
+
+    function update(dt) {
+      // spawn
+      spawnTimer += dt * 1000;
+      if (spawnTimer > spawnInterval) {
+        spawnTimer = 0;
+        spawnObstacle();
+        spawnInterval = Math.max(450, spawnInterval * 0.985);
+        obstacleSpeed = Math.min(900, obstacleSpeed + 6);
+      }
+
+      // move obstacles
+      for (let i = obstacles.length - 1; i >= 0; i--) {
+        const o = obstacles[i];
+        o.top += obstacleSpeed * dt;
+        if (o.top > gameHeight + 20) {
+          // off-screen
+          o.el.remove();
+          obstacles.splice(i, 1);
+          score += 10;
+          scoreEl.textContent = 'Score: ' + score;
+          if (score > best) { best = score; bestEl.textContent = 'Best: ' + best; localStorage.setItem(bestKey, best); }
+          continue;
+        }
+        o.el.style.top = o.top + 'px';
+
+        // collision check
+        const playerRect = player.getBoundingClientRect();
+        const obsRect = o.el.getBoundingClientRect();
+        if (rectsOverlap(playerRect, obsRect)) {
+          gameOver();
+          return;
+        }
+      }
+    }
+
+    // movement
+    const keys = {};
+    window.addEventListener('keydown', e => { keys[e.key] = true; });
+    window.addEventListener('keyup', e => { keys[e.key] = false; });
+
+    function handleMovement(dt) {
+      const speed = 520; // px/sec
+      const maxX = Math.max(0, gameWidth - playerW);
+      if (keys['ArrowLeft'] || keys['a'] || keys['A']) playerX -= speed * dt;
+      if (keys['ArrowRight'] || keys['d'] || keys['D']) playerX += speed * dt;
+      playerX = clamp(playerX, 0, maxX);
+      player.style.left = playerX + 'px';
+    }
+
+    // game loop
+    function loop(ts) {
+      if (!running) { lastTime = ts; requestAnimationFrame(loop); return; }
+      if (paused) { lastTime = ts; requestAnimationFrame(loop); return; }
+      const dt = (ts - lastTime) / 1000; // seconds
+      lastTime = ts;
+      handleMovement(dt);
+      update(dt);
+      requestAnimationFrame(loop);
+    }
+
+    // controls
+    btnStart.addEventListener('click', () => { startGame(); overlay.classList.add('hidden'); });
+    btnResume.addEventListener('click', () => { paused = false; overlay.classList.add('hidden'); });
+    btnPause.addEventListener('click', () => { paused = true; overlay.classList.remove('hidden'); });
+    btnRestart.addEventListener('click', () => { restartGame(); overlay.classList.add('hidden'); });
+
+    function startGame() {
+      clearObstacles();
+      score = 0; scoreEl.textContent = 'Score: ' + score;
+      spawnInterval = 1000; obstacleSpeed = 220;
+      running = true; paused = false;
+      lastTime = performance.now(); spawnTimer = 0;
+      requestAnimationFrame(loop);
+    }
+
+    function gameOver() {
+      running = false; paused = true;
+      overlay.classList.remove('hidden');
+      overlay.querySelector('h1').textContent = 'Game Over';
+      // show final score under overlay text
+      const p = overlay.querySelector('p');
+      p.textContent = `You scored ${score}. Hit Restart or Start to play again.`;
+    }
+
+    function restartGame() {
+      clearObstacles();
+      playerX = (gameWidth - playerW) / 2; player.style.left = playerX + 'px';
+      startGame();
+    }
+
+    function clearObstacles() {
+      obstacles.forEach(o => o.el.remove()); obstacles = [];
+    }
+
+    // theme toggle
+    toggleTheme.addEventListener('click', () => {
+      const isDark = document.body.classList.toggle('bg-slate-900');
+      document.body.classList.toggle('text-white', isDark);
+      document.body.classList.toggle('bg-white', !isDark);
+      document.body.classList.toggle('text-black', !isDark);
+      game.classList.toggle('game-area');
+      game.classList.toggle('bg-gray-100');
+    });
+
+    // touch / mobile support
+    leftBtn?.addEventListener('touchstart', e => { keys['ArrowLeft'] = true; });
+    leftBtn?.addEventListener('touchend', e => { keys['ArrowLeft'] = false; });
+    rightBtn?.addEventListener('touchstart', e => { keys['ArrowRight'] = true; });
+    rightBtn?.addEventListener('touchend', e => { keys['ArrowRight'] = false; });
+
+    // drag for desktop
+    let dragging = false;
+    game.addEventListener('mousedown', () => dragging = true);
+    window.addEventListener('mouseup', () => dragging = false);
+    game.addEventListener('mousemove', (e) => {
+      if (!dragging) return;
+      const rect = game.getBoundingClientRect();
+      playerX = clamp(e.clientX - rect.left - playerW / 2, 0, Math.max(0, gameWidth - playerW));
+      player.style.left = playerX + 'px';
+    });
+
+    // swipe for mobile
+    let touchStartX = null;
+    game.addEventListener('touchstart', e => { touchStartX = e.touches[0].clientX; });
+    game.addEventListener('touchmove', e => {
+      if (touchStartX === null) return;
+      const dx = e.touches[0].clientX - touchStartX;
+      playerX = clamp(playerX + dx, 0, Math.max(0, gameWidth - playerW));
+      touchStartX = e.touches[0].clientX;
+      player.style.left = playerX + 'px';
+    });
+    game.addEventListener('touchend', () => touchStartX = null);
+
+    // resize observer
+    const ro = new ResizeObserver(resize);
+    ro.observe(game);
+
+    // init positions
+    function init() {
+      // center player
+      resize();
+      playerX = (gameWidth - playerW) / 2;
+      player.style.left = playerX + 'px';
+      overlay.querySelector('h1').textContent = '2D Dodger';
+      overlay.querySelector('p').textContent = 'Dodge the falling blocks. Use ← → keys or drag/tap on mobile.';
+      btnResume.style.display = 'none';
+      requestAnimationFrame(loop);
+    }
+
+    // show best score from localStorage
+    bestEl.textContent = 'Best: ' + best;
+
+    init();
+  </script>
+</body>
+</html>
