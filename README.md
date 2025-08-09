@@ -18,4 +18,4 @@ A simple 2D game built with HTML, Tailwind CSS, and JavaScript.
 ## Run the Game
 1. Clone this repo:
    ```bash
-   git clone https://github.com/your-username/2d-dodger-game.git
+   git clone https://github.com/PremNarvekar/2D-game.git
